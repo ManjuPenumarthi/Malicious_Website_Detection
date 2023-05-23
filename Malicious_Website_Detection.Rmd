@@ -1,0 +1,659 @@
+---
+title: "571_Midterm_Manju_Penumarthi"
+output: html_document
+---
+
+```{r initiatePackages, message=FALSE, warning=FALSE}
+## installing required libraries
+library(tidyverse)
+library(readr)
+library(dplyr)
+library(ggplot2)
+library(tidyr)
+library(caret)
+library(Metrics)
+library(randomForest)
+library(e1071)
+library(rpart)
+library(naivebayes)
+library(devtools)
+library(DMwR)
+```
+
+```{r}
+
+# Loading the labelled dataset using read.csv function
+websites_labelled.df <- read.csv("websites_labelled.csv")
+
+```
+
+```{r}
+
+# plot to display count of registered/unregistered domains
+
+ggplot(websites_labelled.df, aes(x = registered_domain, fill = registered_domain)) + geom_bar() +
+  labs(x = "Registered Domain", y = "Count", title = "Registered Domain distribution") +
+  scale_fill_manual(values = c("seagreen", "steelblue"), labels = c("complete", "incomplete"))
+
+```
+
+```{r}
+
+# plot to display count of websites using https
+
+ggplot(websites_labelled.df, aes(x = https, fill = https)) + geom_bar() +
+  labs(x = "https", y = "Count", title = "https distribution") +
+  scale_fill_manual(values = c("seagreen", "steelblue"), labels = c("no", "yes"))
+
+```
+
+```{r}
+# plot to display Percentage of Unique Users per day by Server Location
+websites_labelled.df %>%
+  group_by(server_loc) %>%
+  summarize(total_unique_users = sum(unique_users_day)) %>%
+  mutate(percentage = total_unique_users/sum(total_unique_users)*100) %>%
+  ggplot(aes(x = server_loc, y = percentage, fill = server_loc)) +
+  geom_bar(stat = "identity") +
+  geom_text(aes(label = paste(round(percentage,2), "%"), y = percentage), vjust = -0.5) +
+  labs(x = "Server Location", y = "Percentage of Unique Users per day", title = "Percentage of Unique Users per day by Server Location") +
+  scale_y_continuous(labels = scales::percent) +
+  theme(axis.text.x = element_text(angle = 90, vjust = 0.5))
+```
+```{r}
+# Calculate percentage of 'good' labels
+good_percentages <- websites_labelled.df %>%
+  group_by(most_visitors_loc) %>%
+  summarise(good = mean(label == 'good') * 100)
+
+# Calculate percentage of 'bad' labels
+bad_percentages <- websites_labelled.df %>%
+  group_by(most_visitors_loc) %>%
+  summarise(bad = mean(label == 'bad') * 100)
+
+# Combine data frames
+label_percentages <- left_join(good_percentages, bad_percentages, by = 'most_visitors_loc')
+
+# Create plot
+ggplot(data = label_percentages, aes(x = most_visitors_loc)) +
+  geom_bar(aes(y = good), fill = 'steelblue', stat = 'identity') +
+  geom_bar(aes(y = -bad), fill = 'red', stat = 'identity') +
+  geom_text(aes(y = good, label = round(good, 1)), vjust = -0.5) +
+  geom_text(aes(y = -bad, label = round(bad, 1)), vjust = 1.0) +
+  scale_y_continuous(labels = abs) +
+  labs(title = "Percentage of 'Good' and 'Bad' labels by Most Visitors Location", 
+       x = "Most Visitors Location", y = "Percentage of Labels") +
+  theme(plot.title = element_text(hjust = 0.5),
+        axis.text.x = element_text(angle = 45, hjust = 1)) +
+  facet_grid(rows = vars('Label'), scales = 'free_y')
+```
+
+```{r}
+
+# drop the unique id column from the original dataset and store it in an another dataframe
+websites_labelled_mod.df <- websites_labelled.df[, -1]  # drop column 1
+
+# set the seed for reproducibility
+set.seed(420)
+
+# Split data into 75% training and 25% test sets
+index <- sample(nrow(websites_labelled_mod.df),nrow(websites_labelled_mod.df)*0.75)
+labelled.train.set <- websites_labelled_mod.df[index,]
+labelled.test.set <- websites_labelled_mod.df[-index,]
+
+```
+
+```{r}
+
+# Imputing the Training Data
+
+# Use colSums() to check for missing values in labelled train data
+colSums(is.na(labelled.train.set))
+
+# store copy of labelled train data in new df
+labelled.train.set.mod <- labelled.train.set
+
+# calculate the mode of the non-missing values
+mode_value <- names(sort(table(labelled.train.set.mod$server_loc), decreasing = TRUE))[1]
+
+# replace missing values with the mode value
+labelled.train.set.mod$server_loc[is.na(labelled.train.set.mod$server_loc)] <- mode_value
+
+# Create new columns in train dataset
+labelled.train.set.mod <- labelled.train.set.mod %>%
+  mutate(value = 1) %>%
+  spread(registered_domain, value, fill=0)
+
+labelled.train.set.mod <- labelled.train.set.mod %>%
+  mutate(value = 1) %>%
+  spread(https, value, fill=0)
+
+# apply label encoding to few categorical columns
+labelled.train.set.mod$server_loc <- factor(labelled.train.set.mod$server_loc)
+labelled.train.set.mod$server_loc_encoded <- as.integer(labelled.train.set.mod$server_loc)
+
+labelled.train.set.mod$most_visitors_loc <- factor(labelled.train.set.mod$most_visitors_loc)
+labelled.train.set.mod$most_visitors_loc_encoded <- as.integer(labelled.train.set.mod$most_visitors_loc)
+
+labelled.train.set.mod$ip_add <- factor(labelled.train.set.mod$ip_add)
+labelled.train.set.mod$ip_add_encoded <- as.integer(labelled.train.set.mod$ip_add)
+
+labelled.train.set.mod$website_domain <- factor(labelled.train.set.mod$website_domain)
+labelled.train.set.mod$website_domain_encoded <- as.integer(labelled.train.set.mod$website_domain)
+
+# drop original columns which are encoded above
+labelled.train.set.mod <- labelled.train.set.mod %>% select(-server_loc, -most_visitors_loc, -ip_add, -website_domain)
+
+# Change datatype of target variable to factor
+labelled.train.set.mod$label <- as.factor(labelled.train.set.mod$label)
+
+# display structure of dataframe using str function
+str(labelled.train.set.mod)
+```
+
+```{r}
+
+# Imputing the Testing Data
+
+# Use colSums() to check for missing values in labelled test data
+colSums(is.na(labelled.test.set))
+
+# store copy of labelled train data in new df
+labelled.test.set.mod <- labelled.test.set
+
+# calculate the mode of the non-missing values
+mode_value <- names(sort(table(labelled.test.set.mod$server_loc), decreasing = TRUE))[1]
+
+# replace missing values with the mode value
+labelled.test.set.mod$server_loc[is.na(labelled.test.set.mod$server_loc)] <- mode_value
+
+# Create new columns in train dataset
+labelled.test.set.mod <- labelled.test.set.mod %>%
+  mutate(value = 1) %>%
+  spread(registered_domain, value, fill=0)
+
+labelled.test.set.mod <- labelled.test.set.mod %>%
+  mutate(value = 1) %>%
+  spread(https, value, fill=0)
+
+# apply label encoding to few categorical columns
+labelled.test.set.mod$server_loc <- factor(labelled.test.set.mod$server_loc)
+labelled.test.set.mod$server_loc_encoded <- as.integer(labelled.test.set.mod$server_loc)
+
+labelled.test.set.mod$most_visitors_loc <- factor(labelled.test.set.mod$most_visitors_loc)
+labelled.test.set.mod$most_visitors_loc_encoded <- as.integer(labelled.test.set.mod$most_visitors_loc)
+
+labelled.test.set.mod$ip_add <- factor(labelled.test.set.mod$ip_add)
+labelled.test.set.mod$ip_add_encoded <- as.integer(labelled.test.set.mod$ip_add)
+
+labelled.test.set.mod$website_domain <- factor(labelled.test.set.mod$website_domain)
+labelled.test.set.mod$website_domain_encoded <- as.integer(labelled.test.set.mod$website_domain)
+
+# drop original columns which are encoded above
+labelled.test.set.mod <- labelled.test.set.mod %>% select(-server_loc, -most_visitors_loc, -ip_add, -website_domain)
+
+# Change datatype of target variable to factor
+labelled.test.set.mod$label <- as.factor(labelled.test.set.mod$label)
+
+# display structure of dataframe using str function
+str(labelled.test.set.mod)
+```
+############################################Naive Bayes Algorithm Implementation############################################
+
+```{r}
+
+# Apply naive bayes model to modified dataset
+nb_modified <- train(label~.,
+                    data = labelled.train.set.mod,
+                    method = "naive_bayes",
+                    metric = "Accuracy")
+
+# Predict on modified test dataset
+pred.nb_modified <- predict(nb_modified, labelled.test.set.mod)
+
+# Print confusion matrix to get accuracy on modified dataset
+confusionMatrix(pred.nb_modified, labelled.test.set.mod$label, mode = "everything")
+# Accuracy: 0.9984
+```
+# The model is not running on the original dataset without changing the categorical variables to numerics. After adding new columns by applying one-hot and label-encoding techniques, the accuracy obtained on the modified dataset is 0.9984.
+
+```{r}
+# Feature selection
+varImp(nb_modified)
+
+# Train naive bayes classifier on a modified version of the dataset by selecting a subset of features obtained from above feature importance measure
+nb_selectvar1 <- train(label ~ js_len+js_obf_len+yes+no+incomplete+complete,
+                       data = labelled.train.set.mod,
+                       method = "naive_bayes",
+                       metric = "Accuracy")
+
+# Makes predictions on the test dataset using the selected features
+pred_nb_selectvar1 <- predict(nb_selectvar1, labelled.test.set.mod)
+
+# Evaluates the performance of the classifier using a confusion matrix
+confusionMatrix(pred_nb_selectvar1, labelled.test.set.mod$label, mode = "everything")
+#Accuracy = 0.9984
+```
+# Adding features plus feature selection didn't showed any increase in the accuracy of 0.9984. So, the best model still is 'nb_modified'.     
+
+```{r}
+
+# display frequency table of the values in the label column of the train set
+table(labelled.train.set.mod$label)
+
+# Perform SMOTE on the training set
+labelled.train.set.mod.balanced <- SMOTE(label ~ ., labelled.train.set.mod, perc.over = 100, perc.under = 200)
+
+# Count the number of observations in each class of the balanced training set
+table(labelled.train.set.mod.balanced$label)
+
+# Apply naive bayes to SMOTE balanced data
+nb_smote <- train(label~.,
+                      data = labelled.train.set.mod.balanced,
+                      method = "naive_bayes",
+                      metric = "Accuracy")
+
+# Predict on test dataset
+pred_nb_smote <- predict(nb_smote, labelled.test.set.mod)
+
+# Print confusion matrix
+confusionMatrix(pred_nb_smote, labelled.test.set.mod$label, mode = "everything")
+# Accuracy: 0.9601
+```
+# The initial modified Model is still the best model. Thus, adding features plus feature selection plus SMOTE sampling doesn't improved accuracy.
+
+```{r}
+
+# Specify tuning parameter grid
+nb_grid <- expand.grid(laplace = seq(0, 2, by = 0.1),
+                       usekernel = c(TRUE, FALSE),
+                       adjust = c(TRUE, FALSE))
+
+# Train naive Bayes model with cross-validation and hyperparameter tuning
+nb_variables_tuned <- train(label~.,
+                        data = labelled.train.set.mod,
+                        method = "naive_bayes",
+                        metric = "Accuracy",
+                        trControl = trainControl(method = "cv", number = 10),
+                        tuneGrid = nb_grid)
+
+# Check the best hyperparameters
+nb_variables_tuned$bestTune
+
+# Make predictions on the test dataset using the tuned model
+pred_nb_variables_tuned <- predict(nb_variables_tuned, labelled.test.set.mod)
+
+# Evaluate the performance of the tuned model using a confusion matrix
+confusionMatrix(pred_nb_variables_tuned, labelled.test.set.mod$label, mode = "everything")
+#Accuracy: 0.9984 
+```
+# Based on the above output, it seems that the best hyperparameters for the naive Bayes model are:
+
+#laplace = 0
+#usekernel = TRUE
+#adjust = TRUE
+
+# These hyperparameters were selected through hyperparameter tuning, which aimed to find the combination of hyperparameters that resulted in the highest accuracy on the training set.
+
+# Thus, adding features plus feature selection plus hyperparameter tuning resulted in the same accuracy as of the nb_modified model.
+
+```{r}
+
+# Set seed for reproducibility
+set.seed(123)
+
+# Specify final feature set
+# final_features include all the columns from labelled.train.set.mod dataset
+
+# Specify final hyperparameters
+final_hyperparams <- list(laplace = 0, usekernel = TRUE, adjust = TRUE)
+
+# Train naive Bayes model with 5-fold cross-validation and final features/hyperparameters
+nb_final <- train(label ~ .,
+                  data = labelled.train.set.mod,
+                  method = "naive_bayes",
+                  metric = "Accuracy",
+                  trControl = trainControl(method = "repeatedcv", number = 5, repeats = 50),
+                  tuneGrid = data.frame(laplace = final_hyperparams$laplace,
+                                        usekernel = final_hyperparams$usekernel,
+                                        adjust = final_hyperparams$adjust))
+          
+
+# Print final model information
+nb_final
+summary(nb_final)
+
+# Make predictions on the test dataset using the final model
+pred_nb_final <- predict(nb_final, labelled.test.set.mod)
+
+# Evaluate the performance of the final model using a confusion matrix
+confusionMatrix(pred_nb_final, labelled.test.set.mod$label, mode = "everything")
+# Using the best features and hyperparameters the accuracy obtained is 0.9984
+```
+# Thus, the accuracy of the final model is 0.9984
+# final_features include all the columns from labelled.train.set.mod dataset
+# final hyperparameters are laplace = 0, usekernel = TRUE, and adjust = TRUE
+
+############################################Random Forest Algorithm Implementation############################################
+
+```{r}
+
+# Apply random forest model to modified dataset
+rf_modified <- train(label~.,
+                    data = labelled.train.set.mod,
+                    method = "rf",
+                    metric = "Accuracy")
+
+# Predict on modified test dataset
+pred.rf_modified <- predict(rf_modified, labelled.test.set.mod)
+
+# Print confusion matrix to get accuracy on modified dataset
+confusionMatrix(pred.rf_modified, labelled.test.set.mod$label, mode = "everything")
+#Accuracy = 0.9984
+```
+# The model is not running on the original dataset without changing the categorical variables to numerics. After adding new columns by applying one-hot and label-encoding techniques, the accuracy obtained on the modified dataset is 0.9984.
+
+```{r}
+# Feature selection - Method 1
+varImp(rf_modified)
+
+# Train random forest classifier on a modified version of the dataset by selecting a subset of features obtained from above feature importance measure
+rf_selectvar1 <- train(label~.,
+                       data = labelled.train.set.mod,
+                       method = "rf",
+                       metric = "Accuracy")
+
+# Makes predictions on the test dataset using the selected features
+pred_rf_selectvar1 <- predict(rf_selectvar1, labelled.test.set.mod)
+
+# Evaluates the performance of the classifier using a confusion matrix
+confusionMatrix(pred_rf_selectvar1, labelled.test.set.mod$label, mode = "everything")
+#Accuracy = 0.9984
+
+```
+# Adding features plus feature selection didn't showed any increase in the accuracy of 0.9984. So, the best model still is 'rf_modified'.
+
+```{r}
+
+# Apply random forest to smote data
+rf_smote <- train(label~.,
+                      data = labelled.train.set.mod.balanced,
+                      method = "rf",
+                      metric = "Accuracy")
+
+# Predict on test dataset
+pred_rf_smote <- predict(rf_smote, labelled.test.set.mod)
+
+# Print confusion matrix
+confusionMatrix(pred_rf_smote, labelled.test.set.mod$label, mode = "everything")
+# Accuracy: 0.994
+```
+# The Model generated with the feature selection 'rf_modified' is still the best model. Thus, adding features plus feature selection plus SMOTE sampling doesn't improved accuracy.
+
+```{r}
+
+# Define the control object for hyperparameter tuning
+control.hype <- trainControl(method = "cv",
+                             number = 10,
+                             verboseIter = TRUE,
+                             search = "random",
+                             allowParallel = TRUE)
+
+# Specify tuning parameter grid
+rfGrid <-  expand.grid(mtry = c(1,2,3),
+                       min.node.size = c(1,3,5,7),
+                       splitrule = c("extratrees"))
+
+# Train random forest model with cross-validation and hyperparameter tuning
+rf_variables_tuned <- train(label~.,
+                           data = labelled.train.set.mod, 
+                           method = "ranger", 
+                           trControl = control.hype,
+                           tuneGrid = rfGrid)
+
+# Check the best hyperparameters
+rf_variables_tuned$bestTune
+
+# Make predictions on the test dataset using the tuned model
+pred_rf_variables_tuned <- predict(rf_variables_tuned, labelled.test.set.mod)
+
+# Evaluate the performance of the tuned model using a confusion matrix
+confusionMatrix(pred_rf_variables_tuned, labelled.test.set.mod$label, mode = "everything")
+# Accuracy: 0.9983
+```
+
+# Based on the above output, it seems that the best hyperparameters for the random forest model are:
+
+#mtry = 3
+#splitrule = extratrees
+#min.node.size = 7
+
+# These hyperparameters were selected through hyperparameter tuning, which aimed to find the combination of hyperparameters that resulted in the highest accuracy on the training set.
+
+# Thus, adding features plus SMOTE sampling plus feature selection plus hyperparameter tuning doesn't improved accuracy in this case. 'rf_modified' is still the best model.
+
+```{r}
+
+# Set seed for reproducibility
+set.seed(123)
+
+# Specify final feature set
+# final_features include all the columns from labelled.train.set.mod dataset
+
+# Specify final hyperparameters
+final_hyperparams <- list(mtry = 3, min.node.size = 7, splitrule = c("extratrees"))
+
+# Train naive Bayes model with 5-fold cross-validation and final features/hyperparametersrf
+rf_final <- train(label~.,
+                  data = labelled.train.set.mod,
+                  method = "ranger",
+                  metric = "Accuracy",
+                  trControl = trainControl(method = "repeatedcv", number = 5, repeats = 50),
+                  tuneGrid = data.frame(mtry = final_hyperparams$mtry,
+                                        min.node.size = final_hyperparams$min.node.size,
+                                        splitrule = final_hyperparams$splitrule))
+
+# Print final model information
+rf_final
+summary(rf_final)
+
+# Make predictions on the test dataset using the final model
+pred_rf_final <- predict(rf_final, labelled.test.set.mod)
+
+# Evaluate the performance of the final model using a confusion matrix
+confusionMatrix(pred_rf_final, labelled.test.set.mod$label, mode = "everything")
+# Using the best features and hyperparameters the accuracy obtained is 0.9981.
+```
+# Thus, the accuracy of the final model is 0.9981
+# final_features include all the columns from labelled.train.set.mod dataset
+# final hyperparameters are mtry = 3, min.node.size = 7, and splitrule = extratrees
+
+############################################Decision Tree Algorithm Implementation############################################
+
+```{r}
+
+# Train a decision tree classifier using the rpart algorithm
+dt_modified <- train(label ~ ., data = labelled.train.set.mod, method = "rpart",
+                  metric = "Accuracy")
+
+# Generate predictions on the test set
+predictions_dt <- predict(dt_modified, newdata = labelled.test.set.mod)
+
+# Display the confusion matrix
+confusionMatrix(predictions_dt, labelled.test.set.mod$label)
+# Accuracy: 0.9983
+```
+# The model is not running on the original dataset without changing the categorical variables to numerics. After adding new columns by applying one-hot and label-encoding techniques, the accuracy obtained on the modified dataset is 0.9983.
+
+```{r}
+# Feature selection - Method 1
+varImp(dt_modified)
+
+# Train random forest classifier on a modified version of the dataset by selecting a subset of features obtained from above feature importance measure
+dt_selectvar1 <- train(label ~ js_len+js_obf_len+no+yes+complete,
+                       data = labelled.train.set.mod,
+                       method = "rpart",
+                       metric = "Accuracy")
+
+# Makes predictions on the test dataset using the selected features
+pred_dt_selectvar1 <- predict(dt_selectvar1, labelled.test.set.mod)
+
+# Evaluates the performance of the classifier using a confusion matrix
+confusionMatrix(pred_dt_selectvar1, labelled.test.set.mod$label, mode = "everything")
+#Accuracy = 0.9983
+
+```
+# Adding features plus feature selection didn't showed any increase in the accuracy of 0.9983. So, the best model still is 'dt_modified'.
+
+```{r}
+# Apply decision tree to SMOTE balanced data
+dt_smote <- train(label~.,
+                      data = labelled.train.set.mod.balanced,
+                      method = "rpart",
+                      metric = "Accuracy")
+
+# Predict on test dataset
+pred_dt_smote <- predict(dt_smote, labelled.test.set.mod)
+
+# Print confusion matrix
+confusionMatrix(pred_dt_smote, labelled.test.set.mod$label, mode = "everything")
+# Accuracy: 0.9877
+```
+# The initial modified Model is still the best model. Thus, adding features plus feature selection plus SMOTE sampling doesn't improved accuracy.
+
+```{r}
+
+# Define the control object for hyperparameter tuning
+control.hype <- trainControl(method = "cv",
+                             number = 10,
+                             verboseIter = TRUE,
+                             search = "random",
+                             allowParallel = TRUE)
+
+# Specify tuning parameter grid
+dtGrid <-  expand.grid(cp = seq(0.01, 0.5, by = 0.01))
+
+# Train decision tree model with cross-validation and hyperparameter tuning
+dt_variables_tuned <- train(label ~ ., data = labelled.train.set.mod, 
+                            method = "rpart", 
+                            trControl = control.hype,
+                            tuneGrid = dtGrid)
+
+# Check the best hyperparameters
+dt_variables_tuned$bestTune
+
+# Make predictions on the test dataset using the tuned model
+pred_dt_variables_tuned <- predict(dt_variables_tuned, labelled.test.set.mod)
+
+# Evaluate the performance of the tuned model using a confusion matrix
+confusionMatrix(pred_dt_variables_tuned, labelled.test.set.mod$label, mode = "everything")
+# Accuracy: 0.9983
+
+```
+# Based on the above output, it seems that the best hyperparameters for the decision tree model are:
+
+#cp = 0.5
+
+# These hyperparameters were selected through hyperparameter tuning, which aimed to find the combination of hyperparameters that resulted in the highest accuracy on the training set.
+
+# Thus, adding features plus feature selection plus hyperparameter tuning resulted in the same accuracy as of the dt_modified model.
+
+```{r}
+
+# Set seed for reproducibility
+set.seed(123)
+
+# Specify final feature set
+# final_features include all the columns from labelled.train.set.mod dataset
+
+# Specify final hyperparameters
+final_hyperparams <- list(cp = 0.5)
+
+# Train naive Bayes model with 5-fold cross-validation and final features/hyperparametersrf
+dt_final <- train(label ~ ., data = labelled.train.set.mod, 
+                  method = "rpart",
+                  metric = "Accuracy",
+                  trControl = trainControl(method = "repeatedcv", number = 5, repeats = 50),
+                  tuneGrid = data.frame(cp = final_hyperparams$cp))
+
+# Print final model information
+dt_final
+summary(dt_final)
+
+# Make predictions on the test dataset using the final model
+pred_dt_final <- predict(dt_final, labelled.test.set.mod)
+
+# Evaluate the performance of the final model using a confusion matrix
+confusionMatrix(pred_dt_final, labelled.test.set.mod$label, mode = "everything")
+# Using the best features and hyperparameters the accuracy obtained is 0.9983.
+```
+# Thus, the accuracy of the final model is 0.9983
+# final_features include all the columns from labelled.train.set.mod dataset
+# final hyperparameters are cp = 0.5
+
+```{r}
+
+# Load actual test dataset
+websites_unlabelled.df <- read.csv("websites_unlabelled.csv")
+
+# stoe original dataset in another dataframe
+websites_unlabelled_mod.df <- websites_unlabelled.df
+
+# drop the unique id column from the original dataset and store it in an another dataframe
+websites_unlabelled_mod.df <- websites_unlabelled_mod.df[, -1]
+
+# calculate the mode of the non-missing values
+mode_value <- names(sort(table(websites_unlabelled_mod.df$server_loc), decreasing = TRUE))[1]
+
+# replace missing values with the mode value
+websites_unlabelled_mod.df$server_loc[is.na(websites_unlabelled_mod.df$server_loc)] <- mode_value
+
+# create new columns in actual test dataset
+websites_unlabelled_mod.df <- websites_unlabelled_mod.df %>%
+  mutate(value = 1) %>%
+  spread(registered_domain, value, fill=0)
+
+websites_unlabelled_mod.df <- websites_unlabelled_mod.df %>%
+  mutate(value = 1) %>%
+  spread(https, value, fill=0)
+
+# apply label encoding to few columns in the actual test dataset
+websites_unlabelled_mod.df$server_loc <- factor(websites_unlabelled_mod.df$server_loc)
+websites_unlabelled_mod.df$server_loc_encoded <- as.integer(websites_unlabelled_mod.df$server_loc)
+
+websites_unlabelled_mod.df$most_visitors_loc <- factor(websites_unlabelled_mod.df$most_visitors_loc)
+websites_unlabelled_mod.df$most_visitors_loc_encoded <- as.integer(websites_unlabelled_mod.df$most_visitors_loc)
+
+websites_unlabelled_mod.df$ip_add <- factor(websites_unlabelled_mod.df$ip_add)
+websites_unlabelled_mod.df$ip_add_encoded <- as.integer(websites_unlabelled_mod.df$ip_add)
+
+websites_unlabelled_mod.df$website_domain <- factor(websites_unlabelled_mod.df$website_domain)
+websites_unlabelled_mod.df$website_domain_encoded <- as.integer(websites_unlabelled_mod.df$website_domain)
+
+# drop original columns which are encoded above
+websites_unlabelled_mod.df <- websites_unlabelled_mod.df %>% select(-server_loc, -most_visitors_loc, -ip_add, -website_domain)
+
+# display structure of dataframe using str function
+str(websites_unlabelled_mod.df)
+```
+
+```{r}
+# Use Naive Bayes to predict pseudo-labels for unlabelled data
+unlabelled.pred <- predict(nb_final, newdata = websites_unlabelled_mod.df)
+
+# Add predicted labels to unlabelled dataset
+websites_unlabelled.df$label <- unlabelled.pred
+
+# Combine labelled and unlabelled datasets
+combined_data <- rbind(websites_labelled.df, websites_unlabelled.df)
+
+# Train a new Naive Bayes model on the combined dataset
+nb_model1 <- naiveBayes(label ~ ., data = combined_data)
+
+# Evaluate model on unlabelled data
+unlabelled.pred1 <- predict(nb_model1, newdata = websites_unlabelled.df)
+
+# Save dataframe to csv file
+websites_unlabelled.df$label <- unlabelled.pred1
+write.csv(websites_unlabelled.df, file = "unlabelled_predicted.csv", row.names = FALSE)
+```
